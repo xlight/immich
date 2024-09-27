@@ -1,21 +1,24 @@
 import 'package:auto_route/auto_route.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/models/backup/backup_state.model.dart';
-import 'package:immich_mobile/providers/backup/backup.provider.dart';
-import 'package:immich_mobile/providers/backup/manual_upload.provider.dart';
-import 'package:immich_mobile/providers/authentication.provider.dart';
+import 'package:immich_mobile/modules/backup/providers/backup.provider.dart';
+import 'package:immich_mobile/modules/backup/providers/manual_upload.provider.dart';
+import 'package:immich_mobile/modules/login/providers/authentication.provider.dart';
 import 'package:immich_mobile/routing/router.dart';
-import 'package:immich_mobile/providers/asset.provider.dart';
-import 'package:immich_mobile/providers/user.provider.dart';
-import 'package:immich_mobile/providers/websocket.provider.dart';
-import 'package:immich_mobile/widgets/common/app_bar_dialog/app_bar_profile_info.dart';
-import 'package:immich_mobile/widgets/common/app_bar_dialog/app_bar_server_info.dart';
-import 'package:immich_mobile/widgets/common/confirm_dialog.dart';
+import 'package:immich_mobile/shared/providers/asset.provider.dart';
+import 'package:immich_mobile/shared/providers/user.provider.dart';
+import 'package:immich_mobile/shared/providers/websocket.provider.dart';
+import 'package:immich_mobile/shared/ui/app_bar_dialog/app_bar_profile_info.dart';
+import 'package:immich_mobile/shared/ui/app_bar_dialog/app_bar_server_info.dart';
+import 'package:immich_mobile/shared/ui/confirm_dialog.dart';
+import 'package:immich_mobile/shared/ui/immich_toast.dart';
 import 'package:immich_mobile/utils/bytes_units.dart';
+import 'package:photo_manager/photo_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class ImmichAppBarDialog extends HookConsumerWidget {
@@ -31,7 +34,8 @@ class ImmichAppBarDialog extends HookConsumerWidget {
 
     useEffect(
       () {
-        ref.read(backupProvider.notifier).updateDiskInfo();
+        ref.read(backupProvider.notifier).updateServerInfo();
+        ref.watch(backupProvider.notifier).getBackupInfo();
         ref.read(currentUserProvider.notifier).refresh();
         return null;
       },
@@ -86,9 +90,71 @@ class ImmichAppBarDialog extends HookConsumerWidget {
       );
     }
 
+    buildFreeSpaceButton() {
+      return buildActionButton(
+        Icons.mobile_friendly_rounded,
+        "profile_drawer_free_up_space",
+        () async {
+          int fileSizeBytes = 0;
+          final List<AssetEntity> localFiles = [];
+          final fileCount = backupState.selectedAlbumsBackupAssetsIds.length;
+          if (fileCount == 0) return;
+
+          for (var i = 0; i < fileCount; i++) {
+            var assetId =
+                backupState.selectedAlbumsBackupAssetsIds.elementAt(i);
+            var asset =
+                backupState.allUniqueAssets.where((x) => x.id == assetId).first;
+
+            fileSizeBytes += (await asset.originBytes)!.length;
+            localFiles.add(asset);
+          }
+
+          showDialog(
+            context: context,
+            builder: (BuildContext ctx) {
+              return ConfirmDialog(
+                title: "app_bar_free_up_space_dialog_title",
+                content: "app_bar_free_up_space_dialog_content".tr(
+                  args: ["$fileCount"],
+                ),
+                ok: "app_bar_free_up_space_dialog_ok".tr(
+                  args: [
+                    formatBytes(fileSizeBytes),
+                  ],
+                ),
+                onOk: () async {
+                  final isDeleted = await ref
+                      .read(assetProvider.notifier)
+                      .deleteLocalOnlyAssetEntities(
+                        localFiles,
+                      );
+
+                  if (isDeleted) {
+                    final assetOrAssets =
+                        localFiles.length > 1 ? 'assets' : 'asset';
+                    ImmichToast.show(
+                      context: context,
+                      msg: "app_bar_free_up_space_dialog_toast".tr(
+                        args: [
+                          "${localFiles.length}",
+                          assetOrAssets,
+                        ],
+                      ),
+                      gravity: ToastGravity.BOTTOM,
+                    );
+                  }
+                },
+              );
+            },
+          );
+        },
+      );
+    }
+
     buildSettingButton() {
       return buildActionButton(
-        Icons.settings_outlined,
+        Icons.settings_rounded,
         "profile_drawer_settings",
         () => context.pushRoute(const SettingsRoute()),
       );
@@ -116,6 +182,7 @@ class ImmichAppBarDialog extends HookConsumerWidget {
                 ok: "app_bar_signout_dialog_ok",
                 onOk: () async {
                   await ref.read(authenticationProvider.notifier).logout();
+
                   ref.read(manualUploadProvider.notifier).cancelBackup();
                   ref.read(backupProvider.notifier).cancelBackup();
                   ref.read(assetProvider.notifier).clearAllAsset();
@@ -145,7 +212,9 @@ class ImmichAppBarDialog extends HookConsumerWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 4),
           decoration: BoxDecoration(
-            color: context.colorScheme.surface,
+            color: context.isDarkTheme
+                ? context.scaffoldBackgroundColor
+                : const Color.fromARGB(255, 225, 229, 240),
           ),
           child: ListTile(
             minLeadingWidth: 50,
@@ -168,10 +237,10 @@ class ImmichAppBarDialog extends HookConsumerWidget {
                   Padding(
                     padding: const EdgeInsets.only(top: 8.0),
                     child: LinearProgressIndicator(
-                      minHeight: 10.0,
+                      minHeight: 5.0,
                       value: percentage,
-                      borderRadius:
-                          const BorderRadius.all(Radius.circular(10.0)),
+                      backgroundColor: Colors.grey,
+                      color: theme.primaryColor,
                     ),
                   ),
                   Padding(
@@ -236,40 +305,37 @@ class ImmichAppBarDialog extends HookConsumerWidget {
       );
     }
 
-    return Dismissible(
-      direction: DismissDirection.down,
-      onDismissed: (_) => Navigator.of(context).pop(),
-      key: const Key('app_bar_dialog'),
-      child: Dialog(
-        clipBehavior: Clip.hardEdge,
-        alignment: Alignment.topCenter,
-        insetPadding: EdgeInsets.only(
-          top: isHorizontal ? 20 : 40,
-          left: horizontalPadding,
-          right: horizontalPadding,
-          bottom: isHorizontal ? 20 : 100,
-        ),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: SizedBox(
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  child: buildTopRow(),
-                ),
-                const AppBarProfileInfoBox(),
-                buildStorageInformation(),
-                const AppBarServerInfo(),
-                buildAppLogButton(),
-                buildSettingButton(),
-                buildSignOutButton(),
-                buildFooter(),
-              ],
-            ),
+    return Dialog(
+      clipBehavior: Clip.hardEdge,
+      alignment: Alignment.topCenter,
+      insetPadding: EdgeInsets.only(
+        top: isHorizontal ? 20 : 40,
+        left: horizontalPadding,
+        right: horizontalPadding,
+        bottom: isHorizontal ? 20 : 100,
+      ),
+      backgroundColor: theme.cardColor,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: SizedBox(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                child: buildTopRow(),
+              ),
+              const AppBarProfileInfoBox(),
+              buildStorageInformation(),
+              const AppBarServerInfo(),
+              buildFreeSpaceButton(),
+              buildAppLogButton(),
+              buildSettingButton(),
+              buildSignOutButton(),
+              buildFooter(),
+            ],
           ),
         ),
       ),

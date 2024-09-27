@@ -115,6 +115,47 @@ class AssetNotifier extends StateNotifier<bool> {
     return false;
   }
 
+  Future<bool> deleteLocalOnlyAssetEntities(
+    Iterable<AssetEntity> deleteAssets,
+  ) async {
+    _deleteInProgress = true;
+    state = true;
+    try {
+      final localDeleted = await _deleteLocalAssetEntities(deleteAssets);
+      if (localDeleted.isNotEmpty) {
+        final localOnlyEntityIds = deleteAssets.map((e) => e.id).toList();
+        final allLocalAssets =
+            await _db.assets.filter().localIdIsNotEmpty().findAll();
+        final localAssets = allLocalAssets
+            .where((element) => localOnlyEntityIds.contains(element.localId))
+            .toList();
+
+        final localOnlyIds = localAssets
+            .where((e) => e.storage == AssetState.local)
+            .map((e) => e.id)
+            .toList();
+        final mergedAssets =
+            localAssets.where((e) => e.storage == AssetState.merged).map((e) {
+          e.localId = null;
+          return e;
+        }).toList();
+
+        await _db.writeTxn(() async {
+          if (mergedAssets.isNotEmpty) {
+            await _db.assets.putAll(mergedAssets);
+          }
+          await _db.exifInfos.deleteAll(localOnlyIds);
+          await _db.assets.deleteAll(localOnlyIds);
+        });
+        return true;
+      }
+    } finally {
+      _deleteInProgress = false;
+      state = false;
+    }
+    return false;
+  }
+
   Future<bool> deleteRemoteOnlyAssets(
     Iterable<Asset> deleteAssets, {
     bool force = false,
@@ -258,6 +299,21 @@ class AssetNotifier extends StateNotifier<bool> {
     if (local.isNotEmpty) {
       try {
         return await _ref.read(assetMediaRepositoryProvider).deleteAll(local);
+      } catch (e, stack) {
+        log.severe("Failed to delete asset from device", e, stack);
+      }
+    }
+    return [];
+  }
+
+  Future<List<String>> _deleteLocalAssetEntities(
+    Iterable<AssetEntity> assetsToDelete,
+  ) async {
+    final List<String> local = assetsToDelete.map((a) => a.id).toList();
+    // Delete asset from device
+    if (local.isNotEmpty) {
+      try {
+        return await PhotoManager.editor.deleteWithIds(local);
       } catch (e, stack) {
         log.severe("Failed to delete asset from device", e, stack);
       }
